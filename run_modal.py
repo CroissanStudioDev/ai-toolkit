@@ -142,6 +142,8 @@ def main(
     minio_bucket: str = None,
     minio_endpoint: str = None,
     minio_secure: bool = False,
+    minio_access_key: str = None,
+    minio_secret_key: str = None,
 ):
     # Import here so it only runs in Modal container where oyaml is installed
     from toolkit.job import get_job
@@ -158,6 +160,19 @@ def main(
         print(f" - minio bucket: {minio_bucket}")
         print(f" - minio endpoint: {minio_endpoint}")
         print(f" - minio secure: {minio_secure}")
+        if minio_access_key or minio_secret_key:
+            print(" - minio credentials provided")
+
+    # Ensure downstream code can rely on MinIO settings via environment variables
+    if minio_endpoint:
+        os.environ["MINIO_ENDPOINT"] = minio_endpoint
+    if minio_bucket:
+        os.environ["MINIO_BUCKET"] = minio_bucket
+    os.environ["MINIO_SECURE"] = "1" if minio_secure else "0"
+    if minio_access_key:
+        os.environ["MINIO_ACCESS_KEY"] = minio_access_key
+    if minio_secret_key:
+        os.environ["MINIO_SECRET_KEY"] = minio_secret_key
 
     jobs_completed = 0
     jobs_failed = 0
