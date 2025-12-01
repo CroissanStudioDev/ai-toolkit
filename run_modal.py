@@ -8,6 +8,7 @@ modal run run_modal.py --config-file-list-str=/root/ai-toolkit/config/whatever_y
 
 import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+os.environ["MODAL_ENVIRONMENT"] = "narly"
 import sys
 import modal
 from dotenv import load_dotenv
@@ -23,60 +24,82 @@ os.environ['DISABLE_TELEMETRY'] = 'YES'
 
 # define the volume for storing model outputs, using "creating volumes lazily": https://modal.com/docs/guide/volumes
 # you will find your model, samples and optimizer stored in: https://modal.com/storage/your-username/main/flux-lora-models
-model_volume = modal.Volume.from_name("flux-lora-models", create_if_missing=True)
+model_volume = modal.Volume.from_name("goznak-lora-models", create_if_missing=True)
 
 # modal_output, due to "cannot mount volume on non-empty path" requirement
 MOUNT_DIR = "/root/ai-toolkit/modal_output"  # modal_output, due to "cannot mount volume on non-empty path" requirement
 
 # define modal app
+# Install packages in batches to avoid dependency resolution conflicts
+# Core packages first, then others with pinned versions to reduce resolution complexity
 image = (
     modal.Image.debian_slim(python_version="3.11")
     # install required system and pip packages, more about this modal approach: https://modal.com/docs/examples/dreambooth_app
-    .apt_install("libgl1", "libglib2.0-0")
+    .apt_install("git", "libgl1", "libglib2.0-0")
+    # Install core PyTorch packages first
     .pip_install(
-        "python-dotenv",
-        "torch", 
-        "diffusers[torch]", 
-        "transformers", 
-        "ftfy", 
-        "torchvision", 
-        "oyaml", 
-        "opencv-python", 
-        "albumentations",
+        "torch",
+        "torchvision",
+        "torchaudio",
+        "torchao==0.10.0",
+    )
+    # Install core ML packages with pinned versions to avoid conflicts
+    .pip_install(
+        "transformers==4.57.3",
+        "git+https://github.com/huggingface/diffusers@6bf668c4d217ebc96065e673d8a257fd79950d34",
+        "accelerate",
         "safetensors",
+        "huggingface_hub",
+        "peft",
+    )
+    # Install image processing packages
+    .pip_install(
+        "opencv-python",
+        "albumentations==1.4.15",
+        "albucore==0.0.16",
+        "kornia",
+        "einops",
+        "invisible-watermark",
+    )
+    # Install training-specific packages
+    .pip_install(
         "lycoris-lora==1.8.3",
-        "flatten_json",
-        "pyyaml",
-        "tensorboard", 
-        "kornia", 
-        "invisible-watermark", 
-        "einops", 
-        "accelerate", 
-        "toml", 
-        "pydantic",
-        "omegaconf",
+        "controlnet_aux==0.0.10",
+        "git+https://github.com/jaretburkett/easy_dwpose.git",
         "k-diffusion",
         "open_clip_torch",
         "timm",
         "prodigyopt",
-        "controlnet_aux==0.0.7",
         "bitsandbytes",
+        "optimum-quanto==0.2.4",
+    )
+    # Install utility packages
+    .pip_install(
+        "python-dotenv",
+        "ftfy",
+        "oyaml",
+        "flatten_json",
+        "pyyaml",
+        "tensorboard",
+        "toml",
+        "pydantic",
+        "omegaconf",
         "hf_transfer",
-        "lpips", 
-        "pytorch_fid", 
-        "optimum-quanto", 
-        "sentencepiece", 
-        "huggingface_hub", 
-        "peft"
+        "lpips",
+        "pytorch_fid",
+        "pytorch-wavelets==1.3.0",
+        "sentencepiece",
     )
 )
 
 # mount for the entire ai-toolkit directory
+# Get the directory where this script is located (ai-toolkit directory)
+AI_TOOLKIT_DIR = os.path.dirname(os.path.abspath(__file__))
 # example: "/Users/username/ai-toolkit" is the local directory, "/root/ai-toolkit" is the remote directory
-code_mount = modal.Mount.from_local_dir("/Users/username/ai-toolkit", remote_path="/root/ai-toolkit")
+image = image.add_local_dir(AI_TOOLKIT_DIR, remote_path="/root/ai-toolkit", ignore=[".git"])
 
 # create the Modal app with the necessary mounts and volumes
-app = modal.App(name="flux-lora-training", image=image, mounts=[code_mount], volumes={MOUNT_DIR: model_volume})
+app = modal.App(name="goznak-styles-ai-toolkit", image=image, volumes={MOUNT_DIR: model_volume})
 
 # Check if we have DEBUG_TOOLKIT in env
 if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
@@ -85,7 +108,6 @@ if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
     torch.autograd.set_detect_anomaly(True)
 
 import argparse
-from toolkit.job import get_job
 
 def print_end_message(jobs_completed, jobs_failed):
     failure_string = f"{jobs_failed} failure{'' if jobs_failed == 1 else 's'}" if jobs_failed > 0 else ""
@@ -106,9 +128,13 @@ def print_end_message(jobs_completed, jobs_failed):
     # more about modal GPU's: https://modal.com/docs/guide/gpu
     gpu="A100", # gpu="H100"
     # more about modal timeouts: https://modal.com/docs/guide/timeouts
-    timeout=7200  # 2 hours, increase or decrease if needed
+    timeout=7200,  # 2 hours, increase or decrease if needed
+    secrets = [modal.Secret.from_name("huggingface-secret")]
 )
 def main(config_file_list_str: str, recover: bool = False, name: str = None):
+    # Import here so it only runs in Modal container where oyaml is installed
+    from toolkit.job import get_job
+    
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
 
