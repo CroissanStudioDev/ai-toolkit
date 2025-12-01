@@ -131,12 +131,33 @@ def print_end_message(jobs_completed, jobs_failed):
     timeout=7200,  # 2 hours, increase or decrease if needed
     secrets = [modal.Secret.from_name("huggingface-secret")]
 )
-def main(config_file_list_str: str, recover: bool = False, name: str = None):
+def main(
+    config_file_list_str: str,
+    recover: bool = False,
+    name: str = None,
+    job_id: str = None,
+    style_id: str = None,
+    dataset: list = None,
+    webhook_url: str = None,
+    minio_bucket: str = None,
+    minio_endpoint: str = None,
+    minio_secure: bool = False,
+):
     # Import here so it only runs in Modal container where oyaml is installed
     from toolkit.job import get_job
     
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
+
+    if job_id or style_id or dataset or webhook_url or minio_bucket or minio_endpoint:
+        print("Received style training metadata:")
+        print(f" - job_id: {job_id}")
+        print(f" - style_id: {style_id}")
+        print(f" - dataset items: {len(dataset) if dataset else 0}")
+        print(f" - webhook_url: {webhook_url}")
+        print(f" - minio bucket: {minio_bucket}")
+        print(f" - minio endpoint: {minio_endpoint}")
+        print(f" - minio secure: {minio_secure}")
 
     jobs_completed = 0
     jobs_failed = 0
