@@ -28,6 +28,7 @@ model_volume = modal.Volume.from_name("goznak-lora-models", create_if_missing=Tr
 
 # modal_output, due to "cannot mount volume on non-empty path" requirement
 MOUNT_DIR = "/root/ai-toolkit/modal_output"  # modal_output, due to "cannot mount volume on non-empty path" requirement
+UPLOADED_DATASET_DIR = "/root/ai-toolkit/uploaded_datasets"
 
 # define modal app
 # Install packages in batches to avoid dependency resolution conflicts
@@ -123,6 +124,29 @@ def print_end_message(jobs_completed, jobs_failed):
     print("========================================")
 
 
+def _write_uploaded_dataset(dataset_files, job_identifier):
+    dataset_root = os.path.join(UPLOADED_DATASET_DIR, job_identifier or "dataset")
+    os.makedirs(dataset_root, exist_ok=True)
+
+    for item in dataset_files:
+        relative_path = item.get("relative_path")
+        content = item.get("content")
+
+        if not relative_path or content is None:
+            continue
+
+        destination = os.path.normpath(os.path.join(dataset_root, relative_path))
+        if not destination.startswith(dataset_root):
+            raise ValueError("Unsafe dataset path detected")
+
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        with open(destination, "wb") as file_handle:
+            file_handle.write(content)
+
+    os.environ["UPLOADED_DATASET_ROOT"] = dataset_root
+    return dataset_root
+
+
 @app.function(
     # request a GPU with at least 24GB VRAM
     # more about modal GPU's: https://modal.com/docs/guide/gpu
@@ -137,13 +161,8 @@ def main(
     name: str = None,
     job_id: str = None,
     style_id: str = None,
-    dataset: list = None,
+    dataset_files: list = None,
     webhook_url: str = None,
-    minio_bucket: str = None,
-    minio_endpoint: str = None,
-    minio_secure: bool = False,
-    minio_access_key: str = None,
-    minio_secret_key: str = None,
 ):
     # Import here so it only runs in Modal container where oyaml is installed
     from toolkit.job import get_job
@@ -151,28 +170,17 @@ def main(
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
 
-    if job_id or style_id or dataset or webhook_url or minio_bucket or minio_endpoint:
+    if job_id or style_id or dataset_files or webhook_url:
         print("Received style training metadata:")
         print(f" - job_id: {job_id}")
         print(f" - style_id: {style_id}")
-        print(f" - dataset items: {len(dataset) if dataset else 0}")
+        print(f" - dataset files: {len(dataset_files) if dataset_files else 0}")
         print(f" - webhook_url: {webhook_url}")
-        print(f" - minio bucket: {minio_bucket}")
-        print(f" - minio endpoint: {minio_endpoint}")
-        print(f" - minio secure: {minio_secure}")
-        if minio_access_key or minio_secret_key:
-            print(" - minio credentials provided")
 
-    # Ensure downstream code can rely on MinIO settings via environment variables
-    if minio_endpoint:
-        os.environ["MINIO_ENDPOINT"] = minio_endpoint
-    if minio_bucket:
-        os.environ["MINIO_BUCKET"] = minio_bucket
-    os.environ["MINIO_SECURE"] = "1" if minio_secure else "0"
-    if minio_access_key:
-        os.environ["MINIO_ACCESS_KEY"] = minio_access_key
-    if minio_secret_key:
-        os.environ["MINIO_SECRET_KEY"] = minio_secret_key
+    dataset_root = None
+    if dataset_files:
+        dataset_root = _write_uploaded_dataset(dataset_files, job_id or style_id)
+        print(f"Uploaded dataset available at: {dataset_root}")
 
     jobs_completed = 0
     jobs_failed = 0
