@@ -321,18 +321,26 @@ if __name__ == "__main__":
     # Remove None values
     call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
 
-    # Call Modal function
-    # Use spawn() for style training jobs (async) or call() for synchronous execution
-    # Wrap in app.run() context manager to ensure app is hydrated before calling functions
-    with app.run():
-        if args.output_json or args.job_id or args.style_id:
-            # Style training: use spawn for async execution
-            result = main.spawn(**call_kwargs)
+    # For style training jobs (spawn mode), use the deployed function
+    if args.output_json or args.job_id or args.style_id:
+        # Lookup the deployed function instead of using local app
+        # This requires the app to be deployed first with: modal deploy run_modal.py
+        app_name = app.name  # "goznak-styles-ai-toolkit"
+        try:
+            deployed_main = modal.Function.lookup(app_name, "main")
+            result = deployed_main.spawn(**call_kwargs)
             modal_job_id = result.object_id if hasattr(result, 'object_id') else str(result)
             
             # Output JSON with modal_job_id
             if args.output_json:
                 print(json.dumps({"modal_job_id": modal_job_id}))
-        else:
-            # Original behavior: synchronous call
+        except Exception as e:
+            print(f"Error: Failed to lookup deployed function '{app_name}/main'.", file=sys.stderr)
+            print(f"The Modal app should be automatically deployed on microservice startup.", file=sys.stderr)
+            print(f"If this error persists, check the microservice logs for deployment errors.", file=sys.stderr)
+            print(f"Original error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Original behavior: synchronous call using local app
+        with app.run():
             main.call(**call_kwargs)
