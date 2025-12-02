@@ -125,8 +125,14 @@ def print_end_message(jobs_completed, jobs_failed):
 
 
 def _write_uploaded_dataset(dataset_files, job_identifier):
+    import base64
+    
     dataset_root = os.path.join(UPLOADED_DATASET_DIR, job_identifier or "dataset")
     os.makedirs(dataset_root, exist_ok=True)
+    
+    # Config directory for config files
+    config_dir = "/root/ai-toolkit/config"
+    os.makedirs(config_dir, exist_ok=True)
 
     for item in dataset_files:
         relative_path = item.get("relative_path")
@@ -135,13 +141,32 @@ def _write_uploaded_dataset(dataset_files, job_identifier):
         if not relative_path or content is None:
             continue
 
-        destination = os.path.normpath(os.path.join(dataset_root, relative_path))
-        if not destination.startswith(dataset_root):
-            raise ValueError("Unsafe dataset path detected")
+        # Decode base64 content if it's a string
+        if isinstance(content, str):
+            content = base64.b64decode(content)
+        elif isinstance(content, list):
+            # Convert list of ints to bytes
+            content = bytes(content)
 
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        with open(destination, "wb") as file_handle:
-            file_handle.write(content)
+        # Handle config files specially - they have __config__/ prefix
+        if relative_path.startswith("__config__/"):
+            # Extract filename and write to config directory
+            config_filename = relative_path[len("__config__/"):]
+            destination = os.path.normpath(os.path.join(config_dir, config_filename))
+            if not destination.startswith(config_dir):
+                raise ValueError("Unsafe config path detected")
+            print(f"Writing config file to: {destination}")
+            with open(destination, "wb") as file_handle:
+                file_handle.write(content)
+        else:
+            # Regular dataset file
+            destination = os.path.normpath(os.path.join(dataset_root, relative_path))
+            if not destination.startswith(dataset_root):
+                raise ValueError("Unsafe dataset path detected")
+
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with open(destination, "wb") as file_handle:
+                file_handle.write(content)
 
     os.environ["UPLOADED_DATASET_ROOT"] = dataset_root
     return dataset_root
