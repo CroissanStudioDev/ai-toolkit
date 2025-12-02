@@ -162,7 +162,8 @@ def main(
     job_id: str = None,
     style_id: str = None,
     dataset_files: list = None,
-    webhook_url: str = None,
+    checkpoint_upload_url: str = None,
+    webhook_url: str = None,  # Kept for backward compatibility
 ):
     # Import here so it only runs in Modal container where oyaml is installed
     from toolkit.job import get_job
@@ -170,12 +171,15 @@ def main(
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
 
-    if job_id or style_id or dataset_files or webhook_url:
+    if job_id or style_id or dataset_files or checkpoint_upload_url or webhook_url:
         print("Received style training metadata:")
         print(f" - job_id: {job_id}")
         print(f" - style_id: {style_id}")
         print(f" - dataset files: {len(dataset_files) if dataset_files else 0}")
-        print(f" - webhook_url: {webhook_url}")
+        if checkpoint_upload_url:
+            print(f" - checkpoint_upload_url: {checkpoint_upload_url}")
+        if webhook_url:
+            print(f" - webhook_url: {webhook_url}")
 
     dataset_root = None
     if dataset_files:
@@ -213,6 +217,8 @@ def main(
     print_end_message(jobs_completed, jobs_failed)
 
 if __name__ == "__main__":
+    import json
+
     parser = argparse.ArgumentParser()
 
     # require at least one config file
@@ -237,9 +243,94 @@ if __name__ == "__main__":
         default=None,
         help='Name to replace [name] tag in config file, useful for shared config file'
     )
+
+    # Style training parameters (for microservice integration)
+    parser.add_argument(
+        '--job-id',
+        type=str,
+        default=None,
+        help='Job identifier from backend'
+    )
+    parser.add_argument(
+        '--style-id',
+        type=str,
+        default=None,
+        help='Style identifier'
+    )
+    parser.add_argument(
+        '--dataset-files-json',
+        type=str,
+        default=None,
+        help='Path to JSON file containing dataset files (list of {relative_path, content})'
+    )
+    parser.add_argument(
+        '--checkpoint-upload-url',
+        type=str,
+        default=None,
+        help='Presigned S3 URL for uploading checkpoint directly to S3'
+    )
+    parser.add_argument(
+        '--webhook-url',
+        type=str,
+        default=None,
+        help='Backend webhook URL to call when training completes (deprecated, use checkpoint_upload_url)'
+    )
+    parser.add_argument(
+        '--output-json',
+        action='store_true',
+        help='Output modal_job_id as JSON for programmatic use'
+    )
+
     args = parser.parse_args()
 
     # convert list of config files to a comma-separated string for Modal compatibility
     config_file_list_str = ",".join(args.config_file_list)
 
-    main.call(config_file_list_str=config_file_list_str, recover=args.recover, name=args.name)
+    # Load dataset files from JSON if provided
+    dataset_files = None
+    if args.dataset_files_json:
+        with open(args.dataset_files_json, 'r', encoding='utf-8') as f:
+            dataset_files_data = json.load(f)
+            # Decode base64 content if needed
+            import base64
+            dataset_files = []
+            for item in dataset_files_data:
+                content = item.get('content')
+                if isinstance(content, str):
+                    # Assume base64 encoded
+                    content = base64.b64decode(content)
+                elif isinstance(content, list):
+                    # Convert list of ints to bytes
+                    content = bytes(content)
+                dataset_files.append({
+                    'relative_path': item['relative_path'],
+                    'content': content
+                })
+
+    # Prepare call arguments
+    call_kwargs = {
+        'config_file_list_str': config_file_list_str,
+        'recover': args.recover,
+        'name': args.name or (f"style-{args.style_id}" if args.style_id else None),
+        'job_id': args.job_id,
+        'style_id': args.style_id,
+        'dataset_files': dataset_files,
+        'checkpoint_upload_url': args.checkpoint_upload_url or args.webhook_url,  # Use checkpoint_upload_url if provided, fallback to webhook_url for compatibility
+        'webhook_url': args.webhook_url,  # Keep for backward compatibility
+    }
+    # Remove None values
+    call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
+
+    # Call Modal function
+    # Use spawn() for style training jobs (async) or call() for synchronous execution
+    if args.output_json or args.job_id or args.style_id:
+        # Style training: use spawn for async execution
+        result = main.spawn(**call_kwargs)
+        modal_job_id = result.object_id if hasattr(result, 'object_id') else str(result)
+        
+        # Output JSON with modal_job_id
+        if args.output_json:
+            print(json.dumps({"modal_job_id": modal_job_id}))
+    else:
+        # Original behavior: synchronous call
+        main.call(**call_kwargs)
