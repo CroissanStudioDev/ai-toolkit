@@ -323,11 +323,12 @@ if __name__ == "__main__":
 
     # For style training jobs (spawn mode), use the deployed function
     if args.output_json or args.job_id or args.style_id:
-        # Lookup the deployed function instead of using local app
+        # Reference the deployed function instead of using local app
         # This requires the app to be deployed first with: modal deploy run_modal.py
         app_name = app.name  # "goznak-styles-ai-toolkit"
         try:
-            deployed_main = modal.Function.lookup(app_name, "main")
+            # Use from_name to reference the deployed function
+            deployed_main = modal.Function.from_name(app_name, "main")
             result = deployed_main.spawn(**call_kwargs)
             modal_job_id = result.object_id if hasattr(result, 'object_id') else str(result)
             
@@ -335,7 +336,7 @@ if __name__ == "__main__":
             if args.output_json:
                 print(json.dumps({"modal_job_id": modal_job_id}))
         except Exception as e:
-            print(f"Error: Failed to lookup deployed function '{app_name}/main'.", file=sys.stderr)
+            print(f"Error: Failed to reference deployed function '{app_name}/main'.", file=sys.stderr)
             print(f"The Modal app should be automatically deployed on microservice startup.", file=sys.stderr)
             print(f"If this error persists, check the microservice logs for deployment errors.", file=sys.stderr)
             print(f"Original error: {e}", file=sys.stderr)
