@@ -224,6 +224,24 @@ def main(
             os.makedirs(MOUNT_DIR, exist_ok=True)
             print(f"Training outputs will be saved to: {MOUNT_DIR}")
             
+            # Update dataset paths if we have an uploaded dataset
+            uploaded_dataset_root = os.environ.get("UPLOADED_DATASET_ROOT")
+            if uploaded_dataset_root:
+                print(f"Updating dataset paths to use uploaded dataset: {uploaded_dataset_root}")
+                for process in job.config.get('process', []):
+                    if 'datasets' in process:
+                        for dataset in process['datasets']:
+                            # Update folder_path if it exists
+                            if 'folder_path' in dataset:
+                                old_path = dataset['folder_path']
+                                dataset['folder_path'] = uploaded_dataset_root
+                                print(f"  Updated dataset folder_path: {old_path} -> {uploaded_dataset_root}")
+                            # Update dataset_path if it exists (takes precedence over folder_path)
+                            if 'dataset_path' in dataset:
+                                old_path = dataset['dataset_path']
+                                dataset['dataset_path'] = uploaded_dataset_root
+                                print(f"  Updated dataset dataset_path: {old_path} -> {uploaded_dataset_root}")
+            
             # run the job
             job.run()
             
