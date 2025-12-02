@@ -323,14 +323,16 @@ if __name__ == "__main__":
 
     # Call Modal function
     # Use spawn() for style training jobs (async) or call() for synchronous execution
-    if args.output_json or args.job_id or args.style_id:
-        # Style training: use spawn for async execution
-        result = main.spawn(**call_kwargs)
-        modal_job_id = result.object_id if hasattr(result, 'object_id') else str(result)
-        
-        # Output JSON with modal_job_id
-        if args.output_json:
-            print(json.dumps({"modal_job_id": modal_job_id}))
-    else:
-        # Original behavior: synchronous call
-        main.call(**call_kwargs)
+    # Wrap in app.run() context manager to ensure app is hydrated before calling functions
+    with app.run():
+        if args.output_json or args.job_id or args.style_id:
+            # Style training: use spawn for async execution
+            result = main.spawn(**call_kwargs)
+            modal_job_id = result.object_id if hasattr(result, 'object_id') else str(result)
+            
+            # Output JSON with modal_job_id
+            if args.output_json:
+                print(json.dumps({"modal_job_id": modal_job_id}))
+        else:
+            # Original behavior: synchronous call
+            main.call(**call_kwargs)
