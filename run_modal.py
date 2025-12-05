@@ -35,6 +35,7 @@ model_volume = modal.Volume.from_name("goznak-lora-models", create_if_missing=Tr
 # modal_output, due to "cannot mount volume on non-empty path" requirement
 MOUNT_DIR = "/root/ai-toolkit/modal_output"  # modal_output, due to "cannot mount volume on non-empty path" requirement
 UPLOADED_DATASET_DIR = "/root/ai-toolkit/uploaded_datasets"
+CONFIG_DIR = "/root/ai-toolkit/config"
 
 # define modal app
 # Install packages in batches to avoid dependency resolution conflicts
@@ -136,8 +137,7 @@ def _write_uploaded_dataset(dataset_files, job_identifier):
     os.makedirs(dataset_root, exist_ok=True)
     
     # Config directory for config files
-    config_dir = "/root/ai-toolkit/config"
-    os.makedirs(config_dir, exist_ok=True)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
 
     for item in dataset_files:
         relative_path = item.get("relative_path")
@@ -157,8 +157,8 @@ def _write_uploaded_dataset(dataset_files, job_identifier):
         if relative_path.startswith("__config__/"):
             # Extract filename and write to config directory
             config_filename = relative_path[len("__config__/"):]
-            destination = os.path.normpath(os.path.join(config_dir, config_filename))
-            if not destination.startswith(config_dir):
+            destination = os.path.normpath(os.path.join(CONFIG_DIR, config_filename))
+            if not destination.startswith(CONFIG_DIR):
                 raise ValueError("Unsafe config path detected")
             print(f"Writing config file to: {destination}")
             with open(destination, "wb") as file_handle:
@@ -265,6 +265,7 @@ def main(
     
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
+    config_dir_path = Path(CONFIG_DIR)
 
     if job_id or style_id or dataset_files or checkpoint_upload_url or webhook_url:
         print("Received style training metadata:")
@@ -291,7 +292,14 @@ def main(
     for config_file in config_file_list:
         try:
             # Load config first so we can modify it before creating the job
-            config = get_config(config_file, name)
+            config_lookup = config_file
+            if config_dir_path.exists():
+                override_path = config_dir_path / Path(config_file).name
+                if override_path.exists():
+                    config_lookup = str(override_path)
+                    if config_lookup != config_file:
+                        print(f"Resolved uploaded config to: {config_lookup}")
+            config = get_config(config_lookup, name)
             
             # Update dataset paths if we have an uploaded dataset (before job creation)
             uploaded_dataset_root = os.environ.get("UPLOADED_DATASET_ROOT")
