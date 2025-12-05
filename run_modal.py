@@ -413,7 +413,8 @@ def main(
         raise
     else:
         if should_cleanup:
-            _cleanup_job_directory(job_root)
+            # _cleanup_job_directory(job_root)
+            pass
 
     print_end_message(jobs_completed, jobs_failed)
 
