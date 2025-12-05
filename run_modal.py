@@ -192,6 +192,7 @@ def main(
 ):
     # Import here so it only runs in Modal container where oyaml is installed
     from toolkit.job import get_job
+    from toolkit.config import get_config
     
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
@@ -218,17 +219,16 @@ def main(
 
     for config_file in config_file_list:
         try:
-            job = get_job(config_file, name)
+            # Load config first so we can modify it before creating the job
+            config = get_config(config_file, name)
             
-            job.config['process'][0]['training_folder'] = MOUNT_DIR
-            os.makedirs(MOUNT_DIR, exist_ok=True)
-            print(f"Training outputs will be saved to: {MOUNT_DIR}")
-            
-            # Update dataset paths if we have an uploaded dataset
+            # Update dataset paths if we have an uploaded dataset (before job creation)
             uploaded_dataset_root = os.environ.get("UPLOADED_DATASET_ROOT")
             if uploaded_dataset_root:
                 print(f"Updating dataset paths to use uploaded dataset: {uploaded_dataset_root}")
-                for process in job.config.get('process', []):
+                # Config structure: config['config']['process'][...]['datasets'][...]
+                config_section = config.get('config', {})
+                for process in config_section.get('process', []):
                     if 'datasets' in process:
                         for dataset in process['datasets']:
                             # Update folder_path if it exists
@@ -241,6 +241,13 @@ def main(
                                 old_path = dataset['dataset_path']
                                 dataset['dataset_path'] = uploaded_dataset_root
                                 print(f"  Updated dataset dataset_path: {old_path} -> {uploaded_dataset_root}")
+            
+            # Create job with modified config
+            job = get_job(config, name)
+            
+            job.config['process'][0]['training_folder'] = MOUNT_DIR
+            os.makedirs(MOUNT_DIR, exist_ok=True)
+            print(f"Training outputs will be saved to: {MOUNT_DIR}")
             
             # run the job
             job.run()
