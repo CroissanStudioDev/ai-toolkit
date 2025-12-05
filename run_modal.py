@@ -6,10 +6,16 @@ modal run run_modal.py --config-file-list-str=/root/ai-toolkit/config/whatever_y
 
 '''
 
+import base64
+import json
 import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-os.environ["MODAL_ENVIRONMENT"] = "narly"
+modal_env = os.environ.get("MODAL_ENV") or os.environ.get("MODAL_ENVIRONMENT") or "main"
+os.environ["MODAL_ENVIRONMENT"] = modal_env
 import sys
+import urllib.request
+from pathlib import Path
+
 import modal
 from dotenv import load_dotenv
 # Load the .env file if it exists
@@ -100,7 +106,8 @@ AI_TOOLKIT_DIR = os.path.dirname(os.path.abspath(__file__))
 image = image.add_local_dir(AI_TOOLKIT_DIR, remote_path="/root/ai-toolkit", ignore=[".git"])
 
 # create the Modal app with the necessary mounts and volumes
-app = modal.App(name="goznak-styles-ai-toolkit", image=image, volumes={MOUNT_DIR: model_volume})
+APP_NAME = os.environ.get("MODAL_APP_NAME", "goznak-styles-ai-toolkit")
+app = modal.App(name=APP_NAME, image=image, volumes={MOUNT_DIR: model_volume})
 
 # Check if we have DEBUG_TOOLKIT in env
 if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
@@ -125,8 +132,6 @@ def print_end_message(jobs_completed, jobs_failed):
 
 
 def _write_uploaded_dataset(dataset_files, job_identifier):
-    import base64
-    
     dataset_root = os.path.join(UPLOADED_DATASET_DIR, job_identifier or "dataset")
     os.makedirs(dataset_root, exist_ok=True)
     
@@ -172,6 +177,68 @@ def _write_uploaded_dataset(dataset_files, job_identifier):
     return dataset_root
 
 
+def _load_dataset_from_dir(dataset_dir: str):
+    dataset_path = Path(dataset_dir)
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
+
+    dataset_files = []
+    for file_path in dataset_path.rglob("*"):
+        if not file_path.is_file():
+            continue
+        relative_path = file_path.relative_to(dataset_path).as_posix()
+        with open(file_path, "rb") as handle:
+            content = base64.b64encode(handle.read()).decode("utf-8")
+        dataset_files.append({"relative_path": relative_path, "content": content})
+
+    return dataset_files
+
+
+def _find_latest_checkpoint(root_dir: str):
+    latest_path = None
+    latest_mtime = -1
+    for dirpath, _, filenames in os.walk(root_dir):
+        for filename in filenames:
+            if not filename.endswith(".safetensors"):
+                continue
+            full_path = os.path.join(dirpath, filename)
+            mtime = os.path.getmtime(full_path)
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+                latest_path = full_path
+    return latest_path
+
+
+def _upload_checkpoint_file(checkpoint_path: str, upload_url: str, headers: dict | None = None):
+    headers = headers or {}
+    print(f"Uploading checkpoint {checkpoint_path} -> {upload_url}")
+    with open(checkpoint_path, "rb") as handle:
+        data = handle.read()
+
+    request = urllib.request.Request(upload_url, data=data, method="PUT")
+    for key, value in headers.items():
+        request.add_header(key, value)
+    request.add_header("Content-Length", str(len(data)))
+
+    with urllib.request.urlopen(request, timeout=600) as response:
+        status_code = response.getcode()
+        if status_code < 200 or status_code >= 300:
+            raise RuntimeError(f"Checkpoint upload failed with status {status_code}")
+        print(f"Checkpoint upload completed with status {status_code}")
+
+
+def _maybe_upload_checkpoint(checkpoint_upload_url: str, checkpoint_headers: dict | None, checkpoint_s3_key: str | None):
+    if not checkpoint_upload_url:
+        return
+
+    checkpoint_path = _find_latest_checkpoint(MOUNT_DIR)
+    if not checkpoint_path:
+        raise RuntimeError("Training completed but no checkpoint was found to upload")
+
+    print(f"Found checkpoint {checkpoint_path} (s3_key={checkpoint_s3_key})")
+    _upload_checkpoint_file(checkpoint_path, checkpoint_upload_url, checkpoint_headers)
+
+
 @app.function(
     # request a GPU with at least 24GB VRAM
     # more about modal GPU's: https://modal.com/docs/guide/gpu
@@ -188,6 +255,8 @@ def main(
     style_id: str = None,
     dataset_files: list = None,
     checkpoint_upload_url: str = None,
+    checkpoint_headers: dict = None,
+    checkpoint_s3_key: str = None,
     webhook_url: str = None,  # Kept for backward compatibility
 ):
     # Import here so it only runs in Modal container where oyaml is installed
@@ -204,6 +273,8 @@ def main(
         print(f" - dataset files: {len(dataset_files) if dataset_files else 0}")
         if checkpoint_upload_url:
             print(f" - checkpoint_upload_url: {checkpoint_upload_url}")
+        if checkpoint_s3_key:
+            print(f" - checkpoint_s3_key: {checkpoint_s3_key}")
         if webhook_url:
             print(f" - webhook_url: {webhook_url}")
 
@@ -264,6 +335,12 @@ def main(
                 print_end_message(jobs_completed, jobs_failed)
                 raise e
 
+    try:
+        _maybe_upload_checkpoint(checkpoint_upload_url, checkpoint_headers, checkpoint_s3_key)
+    except Exception as upload_error:
+        print(f"Failed to upload checkpoint: {upload_error}")
+        raise
+
     print_end_message(jobs_completed, jobs_failed)
 
 if __name__ == "__main__":
@@ -314,16 +391,46 @@ if __name__ == "__main__":
         help='Path to JSON file containing dataset files (list of {relative_path, content})'
     )
     parser.add_argument(
+        '--dataset-dir',
+        type=str,
+        default=None,
+        help='Path to directory containing extracted dataset files'
+    )
+    parser.add_argument(
         '--checkpoint-upload-url',
         type=str,
         default=None,
         help='Presigned S3 URL for uploading checkpoint directly to S3'
     )
     parser.add_argument(
+        '--checkpoint-put-url',
+        type=str,
+        default=None,
+        help='Presigned S3 PUT URL for uploading checkpoint bytes'
+    )
+    parser.add_argument(
+        '--checkpoint-headers-json',
+        type=str,
+        default=None,
+        help='JSON encoded headers required when uploading checkpoint'
+    )
+    parser.add_argument(
+        '--checkpoint-s3-key',
+        type=str,
+        default=None,
+        help='S3 key where the checkpoint will live'
+    )
+    parser.add_argument(
         '--webhook-url',
         type=str,
         default=None,
         help='Backend webhook URL to call when training completes (deprecated, use checkpoint_upload_url)'
+    )
+    parser.add_argument(
+        '--modal-app-name',
+        type=str,
+        default=None,
+        help='Override Modal app name when referencing deployed function'
     )
     parser.add_argument(
         '--output-json',
@@ -356,6 +463,14 @@ if __name__ == "__main__":
                     'relative_path': item['relative_path'],
                     'content': content
                 })
+    elif args.dataset_dir:
+        dataset_files = _load_dataset_from_dir(args.dataset_dir)
+
+    checkpoint_headers = {}
+    if args.checkpoint_headers_json:
+        checkpoint_headers = json.loads(args.checkpoint_headers_json)
+
+    checkpoint_upload_url = args.checkpoint_put_url or args.checkpoint_upload_url or args.webhook_url
 
     # Prepare call arguments
     call_kwargs = {
@@ -365,7 +480,9 @@ if __name__ == "__main__":
         'job_id': args.job_id,
         'style_id': args.style_id,
         'dataset_files': dataset_files,
-        'checkpoint_upload_url': args.checkpoint_upload_url or args.webhook_url,  # Use checkpoint_upload_url if provided, fallback to webhook_url for compatibility
+        'checkpoint_upload_url': checkpoint_upload_url,
+        'checkpoint_headers': checkpoint_headers or None,
+        'checkpoint_s3_key': args.checkpoint_s3_key,
         'webhook_url': args.webhook_url,  # Keep for backward compatibility
     }
     # Remove None values
@@ -375,7 +492,7 @@ if __name__ == "__main__":
     if args.output_json or args.job_id or args.style_id:
         # Reference the deployed function instead of using local app
         # This requires the app to be deployed first with: modal deploy run_modal.py
-        app_name = app.name  # "goznak-styles-ai-toolkit"
+        app_name = args.modal_app_name or APP_NAME
         try:
             # Use from_name to reference the deployed function
             deployed_main = modal.Function.from_name(app_name, "main")
