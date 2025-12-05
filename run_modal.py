@@ -9,12 +9,15 @@ modal run run_modal.py --config-file-list-str=/root/ai-toolkit/config/whatever_y
 import base64
 import json
 import os
+import re
+import shutil
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 modal_env = os.environ.get("MODAL_ENV") or os.environ.get("MODAL_ENVIRONMENT") or "main"
 os.environ["MODAL_ENVIRONMENT"] = modal_env
 import sys
 import urllib.request
 from pathlib import Path
+from uuid import uuid4
 
 import modal
 from dotenv import load_dotenv
@@ -34,8 +37,6 @@ model_volume = modal.Volume.from_name("goznak-lora-models", create_if_missing=Tr
 
 # modal_output, due to "cannot mount volume on non-empty path" requirement
 MOUNT_DIR = "/root/ai-toolkit/modal_output"  # modal_output, due to "cannot mount volume on non-empty path" requirement
-UPLOADED_DATASET_DIR = "/root/ai-toolkit/uploaded_datasets"
-CONFIG_DIR = "/root/ai-toolkit/config"
 
 # define modal app
 # Install packages in batches to avoid dependency resolution conflicts
@@ -132,13 +133,10 @@ def print_end_message(jobs_completed, jobs_failed):
     print("========================================")
 
 
-def _write_uploaded_dataset(dataset_files, job_identifier):
-    dataset_root = os.path.join(UPLOADED_DATASET_DIR, job_identifier or "dataset")
+def _write_uploaded_dataset(dataset_files, dataset_root: str, config_root: str):
     os.makedirs(dataset_root, exist_ok=True)
+    os.makedirs(config_root, exist_ok=True)
     
-    # Config directory for config files
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-
     for item in dataset_files:
         relative_path = item.get("relative_path")
         content = item.get("content")
@@ -157,8 +155,8 @@ def _write_uploaded_dataset(dataset_files, job_identifier):
         if relative_path.startswith("__config__/"):
             # Extract filename and write to config directory
             config_filename = relative_path[len("__config__/"):]
-            destination = os.path.normpath(os.path.join(CONFIG_DIR, config_filename))
-            if not destination.startswith(CONFIG_DIR):
+            destination = os.path.normpath(os.path.join(config_root, config_filename))
+            if not destination.startswith(config_root):
                 raise ValueError("Unsafe config path detected")
             print(f"Writing config file to: {destination}")
             with open(destination, "wb") as file_handle:
@@ -173,7 +171,6 @@ def _write_uploaded_dataset(dataset_files, job_identifier):
             with open(destination, "wb") as file_handle:
                 file_handle.write(content)
 
-    os.environ["UPLOADED_DATASET_ROOT"] = dataset_root
     return dataset_root
 
 
@@ -227,16 +224,64 @@ def _upload_checkpoint_file(checkpoint_path: str, upload_url: str, headers: dict
         print(f"Checkpoint upload completed with status {status_code}")
 
 
-def _maybe_upload_checkpoint(checkpoint_upload_url: str, checkpoint_headers: dict | None, checkpoint_s3_key: str | None):
+def _maybe_upload_checkpoint(
+    checkpoint_upload_url: str,
+    checkpoint_headers: dict | None,
+    checkpoint_s3_key: str | None,
+    checkpoint_root: str,
+):
     if not checkpoint_upload_url:
         return
 
-    checkpoint_path = _find_latest_checkpoint(MOUNT_DIR)
+    checkpoint_path = _find_latest_checkpoint(checkpoint_root)
     if not checkpoint_path:
         raise RuntimeError("Training completed but no checkpoint was found to upload")
 
     print(f"Found checkpoint {checkpoint_path} (s3_key={checkpoint_s3_key})")
     _upload_checkpoint_file(checkpoint_path, checkpoint_upload_url, checkpoint_headers)
+
+
+def _sanitize_identifier(value: str | None) -> str:
+    if not value:
+        return ""
+    sanitized = re.sub(r'[^a-zA-Z0-9._-]+', '-', value.strip())
+    return sanitized.strip("-")
+
+
+def _generate_job_identifier(job_id: str | None, style_id: str | None, name: str | None) -> str:
+    for candidate in (job_id, style_id, name):
+        identifier = _sanitize_identifier(candidate)
+        if identifier:
+            return identifier
+    return f"job-{uuid4().hex}"
+
+
+def _prepare_job_paths(job_id: str | None, style_id: str | None, name: str | None):
+    identifier = _generate_job_identifier(job_id, style_id, name)
+    job_root = os.path.join(MOUNT_DIR, identifier)
+    dataset_root = os.path.join(job_root, "dataset")
+    config_root = os.path.join(job_root, "config")
+    os.makedirs(dataset_root, exist_ok=True)
+    os.makedirs(config_root, exist_ok=True)
+    return {
+        "identifier": identifier,
+        "root": job_root,
+        "dataset_dir": dataset_root,
+        "config_dir": config_root,
+    }
+
+
+def _cleanup_job_directory(job_root: str):
+    if not job_root:
+        return
+    mount_root = os.path.abspath(MOUNT_DIR)
+    target_root = os.path.abspath(job_root)
+    if not target_root.startswith(mount_root):
+        print(f"Skipping cleanup for unexpected path outside mount: {target_root}")
+        return
+    if os.path.exists(target_root):
+        print(f"Cleaning up job directory: {target_root}")
+        shutil.rmtree(target_root, ignore_errors=True)
 
 
 @app.function(
@@ -265,7 +310,11 @@ def main(
     
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
-    config_dir_path = Path(CONFIG_DIR)
+    job_paths = _prepare_job_paths(job_id, style_id, name)
+    job_root = job_paths["root"]
+    dataset_dir = job_paths["dataset_dir"]
+    config_dir_path = Path(job_paths["config_dir"])
+    print(f"Job artifacts directory: {job_root}")
 
     if job_id or style_id or dataset_files or checkpoint_upload_url or webhook_url:
         print("Received style training metadata:")
@@ -281,7 +330,7 @@ def main(
 
     dataset_root = None
     if dataset_files:
-        dataset_root = _write_uploaded_dataset(dataset_files, job_id or style_id)
+        dataset_root = _write_uploaded_dataset(dataset_files, dataset_dir, job_paths["config_dir"])
         print(f"Uploaded dataset available at: {dataset_root}")
 
     jobs_completed = 0
@@ -302,9 +351,8 @@ def main(
             config = get_config(config_lookup, name)
             
             # Update dataset paths if we have an uploaded dataset (before job creation)
-            uploaded_dataset_root = os.environ.get("UPLOADED_DATASET_ROOT")
-            if uploaded_dataset_root:
-                print(f"Updating dataset paths to use uploaded dataset: {uploaded_dataset_root}")
+            if dataset_root:
+                print(f"Updating dataset paths to use uploaded dataset: {dataset_root}")
                 # Config structure: config['config']['process'][...]['datasets'][...]
                 config_section = config.get('config', {})
                 for process in config_section.get('process', []):
@@ -313,20 +361,34 @@ def main(
                             # Update folder_path if it exists
                             if 'folder_path' in dataset:
                                 old_path = dataset['folder_path']
-                                dataset['folder_path'] = uploaded_dataset_root
-                                print(f"  Updated dataset folder_path: {old_path} -> {uploaded_dataset_root}")
+                                dataset['folder_path'] = dataset_root
+                                print(f"  Updated dataset folder_path: {old_path} -> {dataset_root}")
                             # Update dataset_path if it exists (takes precedence over folder_path)
                             if 'dataset_path' in dataset:
                                 old_path = dataset['dataset_path']
-                                dataset['dataset_path'] = uploaded_dataset_root
-                                print(f"  Updated dataset dataset_path: {old_path} -> {uploaded_dataset_root}")
+                                dataset['dataset_path'] = dataset_root
+                                print(f"  Updated dataset dataset_path: {old_path} -> {dataset_root}")
+
+            # Ensure every process writes checkpoints into the job-scoped directory so artifacts stay grouped
+            config_section = config.get('config', {})
+            processes = config_section.get('process', []) or []
+            for process in processes:
+                if isinstance(process, dict):
+                    original_path = process.get('training_folder')
+                    if original_path != job_root:
+                        process['training_folder'] = job_root
+                        if original_path:
+                            print(f"Updated process training folder: {original_path} -> {job_root}")
+            original_job_training_folder = config_section.get('training_folder')
+            if original_job_training_folder != job_root:
+                config_section['training_folder'] = job_root
+                if original_job_training_folder:
+                    print(f"Updated job training folder: {original_job_training_folder} -> {job_root}")
             
             # Create job with modified config
             job = get_job(config, name)
             
-            job.config['process'][0]['training_folder'] = MOUNT_DIR
-            os.makedirs(MOUNT_DIR, exist_ok=True)
-            print(f"Training outputs will be saved to: {MOUNT_DIR}")
+            print(f"Training outputs will be saved to: {job_root}")
             
             # run the job
             job.run()
@@ -343,11 +405,15 @@ def main(
                 print_end_message(jobs_completed, jobs_failed)
                 raise e
 
+    should_cleanup = bool(checkpoint_upload_url)
     try:
-        _maybe_upload_checkpoint(checkpoint_upload_url, checkpoint_headers, checkpoint_s3_key)
+        _maybe_upload_checkpoint(checkpoint_upload_url, checkpoint_headers, checkpoint_s3_key, job_root)
     except Exception as upload_error:
         print(f"Failed to upload checkpoint: {upload_error}")
         raise
+    else:
+        if should_cleanup:
+            _cleanup_job_directory(job_root)
 
     print_end_message(jobs_completed, jobs_failed)
 
